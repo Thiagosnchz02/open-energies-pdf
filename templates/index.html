@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Open Energies · Pruebas PDF</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root{
+      --bg:#0f172a0a;
+      --card:#ffffff;
+      --border:#e2e8f0;
+      --ink:#0f172a;
+      --muted:#64748b;
+      --primary:#0ea5e9;
+      --primary-600:#0284c7;
+      --ring:#bae6fd;
+    }
+    *{box-sizing:border-box}
+    body{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:var(--bg);color:var(--ink)}
+    .page{max-width:1100px;margin:28px auto;padding:0 16px}
+    h1{margin:0 0 18px;font-size:28px;letter-spacing:.2px}
+    h2{margin:0 0 12px;font-size:20px}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:16px 16px 14px;margin:18px 0;box-shadow:0 6px 18px rgba(2,8,23,.04)}
+    .muted{color:var(--muted);font-size:13px}
+    label{display:block;font-weight:600;margin-bottom:6px}
+    input[type=file],textarea,select,input[type=number],input[type=text]{width:100%;border:1px solid var(--border);border-radius:10px;padding:10px 12px;font-size:14px;outline:none;background:#fff;transition:border-color .15s, box-shadow .15s}
+    textarea{min-height:180px}
+    input:focus,textarea:focus,select:focus{border-color:var(--primary);box-shadow:0 0 0 4px var(--ring)}
+    .grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+    .grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+    .btn{display:inline-flex;gap:8px;align-items:center;justify-content:center;padding:11px 16px;border-radius:10px;border:1px solid transparent;background:var(--primary);color:#fff;font-weight:700;cursor:pointer}
+    .btn:hover{background:var(--primary-600)}
+    .btn.ghost{background:#fff;color:var(--ink);border-color:var(--border)}
+    .btn.ghost:hover{border-color:var(--primary);color:var(--primary)}
+    .result{margin-top:10px;font-size:14px;color:#334155;white-space:pre-wrap}
+    .table{width:100%;border-collapse:separate;border-spacing:0;margin-top:6px;border:1px solid var(--border);border-radius:12px;overflow:hidden}
+    .table th,.table td{padding:8px 10px;border-bottom:1px solid var(--border);font-size:13px}
+    .table th{background:#f8fafc;text-align:left;font-weight:700}
+    .table tr:last-child td{border-bottom:0}
+    .section-title{margin:14px 0 6px;font-weight:800;letter-spacing:.2px}
+    .split{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+    .panel{border:1px dashed var(--border);border-radius:12px;padding:12px}
+    .panel h3{margin:0 0 8px;font-size:15px}
+    .toolbar{display:flex;gap:12px;justify-content:flex-end;border-top:1px solid var(--border);padding-top:12px;margin-top:12px}
+    .pill{display:inline-flex;align-items:center;gap:8px;background:#f1f5f9;border-radius:999px;padding:6px 10px;font-size:12px;color:#334155}
+    @media (max-width:900px){
+      .grid2,.grid3,.split{grid-template-columns:1fr}
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <h1>Open Energies · Microservicio PDF (demo)</h1>
+
+    <!-- 1) Subida -->
+    <div class="card">
+      <h2>1) Subir un documento (PDF)</h2>
+      <form id="formUpload">
+        <label for="doc">Elige un PDF (máx. 15 MB)</label>
+        <input id="doc" name="documento" type="file" accept="application/pdf" required />
+        <div style="height:10px"></div>
+        <button class="btn" type="submit">Subir</button>
+        <div id="uploadResult" class="result"></div>
+      </form>
+    </div>
+
+    <!-- 2) HTML -> PDF -->
+    <div class="card">
+      <h2>2) Probar HTML → PDF</h2>
+      <form id="formRender" action="/render-form" method="post" target="_blank">
+        <label for="html">Pega HTML</label>
+        <textarea id="html" name="html">
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; }
+    h1 { margin: 0 0 6px; }
+    .sub { color:#666; font-size:12px; margin-bottom: 16px; }
+    table { width:100%; border-collapse: collapse; margin-top:12px; }
+    th, td { border:1px solid #ddd; padding:8px; font-size:12px; }
+    th { background:#f4f4f4; text-align:left; }
+  </style>
+</head>
+<body>
+  <h1>Comparativa: Proveedor Alfa vs Proveedor Beta</h1>
+  <div class="sub">Generado hoy</div>
+  <table>
+    <tr><th>Característica</th><th>Alfa</th><th>Beta</th></tr>
+    <tr><td>Atención 24/7</td><td>Sí</td><td>No</td></tr>
+    <tr><td>Formación</td><td>Sí</td><td>Sí</td></tr>
+    <tr><td>Integración ERP</td><td>No</td><td>Sí</td></tr>
+  </table>
+</body>
+</html>
+        </textarea>
+        <div style="height:10px"></div>
+        <button class="btn" type="submit">Generar PDF</button>
+      </form>
+      <div class="muted" style="margin-top:6px">Se abrirá el PDF en una pestaña nueva.</div>
+    </div>
+
+    <!-- 3) Demo /compare (fijo) -->
+    <div class="card">
+      <h2>3) Probar Comparativa (demo)</h2>
+      <p class="muted">Usa datos del PDF de ejemplo (Tarifa 2.0TD) y calcula ahorro.</p>
+      <button id="btnCompare" class="btn">Calcular comparativa demo</button>
+      <pre id="cmpOut" class="result"></pre>
+    </div>
+
+    <!-- 4) Vista ASESOR (mejorada) -->
+    <div class="card">
+      <div class="pill">🧑‍💼 Vista asesor</div>
+      <h2 style="margin-top:10px">4) Comparativa (asesor)</h2>
+      <p class="muted">El asesor elige tarifa y rellena datos. El servicio calcula. “Rellenar DEMO” carga los mismos valores que el botón anterior.</p>
+
+      <div class="grid2">
+        <div>
+          <label>Tarifa</label>
+          <select id="asesorTarifa">
+            <option value="2.0TD">2.0TD</option>
+            <option value="3.0TD">3.0TD</option>
+            <option value="6.1TD">6.1TD</option>
+          </select>
+        </div>
+        <div>
+          <label>Alquiler contador (€/año)</label>
+          <input type="number" id="asesorFijos" step="0.01" value="14.41">
+        </div>
+      </div>
+
+      <div class="grid2" style="margin-top:10px">
+        <div>
+          <label>Impuesto Electricidad (%)</label>
+          <input type="number" id="asesorIE" step="0.0001" value="0.05112">
+        </div>
+        <div>
+          <label>IVA (%)</label>
+          <input type="number" id="asesorIVA" step="0.01" value="0.21">
+        </div>
+      </div>
+
+      <div class="grid2" style="margin-top:10px">
+        <div>
+          <label>Dirección del suministro</label>
+          <input type="text" id="infDireccion" placeholder="Calle, nº, piso">
+        </div>
+        <div>
+          <label>Población</label>
+          <input type="text" id="infPoblacion" placeholder="Ciudad / Provincia">
+        </div>
+      </div>
+
+      <div class="grid2" style="margin-top:10px">
+        <div>
+          <label>CUPS</label>
+          <input type="text" id="infCUPS" placeholder="ES0021...">
+        </div>
+        <div><!-- hueco para mantener la rejilla --></div>
+      </div>
+
+      <div class="grid2" style="margin-top:10px">
+        <div>
+          <label>CIF</label>
+          <input type="text" id="infCIF" placeholder="B12345678">
+        </div>
+        <div>
+          <label>Fecha de estudio</label>
+          <input type="date" id="infFecha">
+        </div>
+      </div>
+
+      <div class="section-title">Potencia contratada (kW) por periodo</div>
+      <table class="table" id="tablaPot">
+        <thead><tr id="potHead"></tr></thead>
+        <tbody><tr id="potValues"></tr></tbody>
+      </table>
+
+      <div class="section-title">Energía anual (kWh) por periodo</div>
+      <table class="table" id="tablaEne">
+        <thead><tr id="eneHead"></tr></thead>
+        <tbody><tr id="eneValues"></tr></tbody>
+      </table>
+
+      <div class="split" style="margin-top:12px">
+        <div class="panel">
+          <h3>Plan “Actual” (cliente)</h3>
+          <div class="muted">Precios de su compañía</div>
+
+          <div class="section-title" style="margin-top:10px">€/kW·año (Potencia)</div>
+          <table class="table">
+            <thead>
+              <tr id="actPotHead"></tr>
+            </thead>
+            <tbody><tr id="actPotValues"></tr></tbody>
+          </table>
+
+          <div class="section-title" style="margin-top:10px">€/kWh (Energía)</div>
+          <table class="table">
+            <thead>
+              <tr id="actEneHead"></tr>
+            </thead>
+            <tbody><tr id="actEneValues"></tr></tbody>
+          </table>
+        </div>
+
+        <div class="panel">
+          <h3>Plan “Propuesta” (nuestra oferta)</h3>
+          <div class="muted">Precios que aplicará Open Energies</div>
+          <div style="margin:8px 0 2px">
+            <label>Oferta</label>
+            <select id="ofertaSelect"></select>
+          </div>
+
+          <div class="section-title" style="margin-top:10px">€/kW·año (Potencia)</div>
+          <table class="table">
+            <thead>
+              <tr id="proPotHead"></tr>
+            </thead>
+            <tbody><tr id="proPotValues"></tr></tbody>
+          </table>
+
+          <div class="section-title" style="margin-top:10px">€/kWh (Energía)</div>
+          <table class="table">
+            <thead>
+              <tr id="proEneHead"></tr>
+            </thead>
+            <tbody><tr id="proEneValues"></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="toolbar">
+        <button id="btnAsesorDemo" type="button" class="btn ghost">Rellenar DEMO</button>
+        <button id="btnAsesorCalcular" type="button" class="btn">Calcular (asesor)</button>
+        <button id="btnAsesorPDF" type="button" class="btn">Generar PDF (asesor)</button>
+      </div>
+
+      <pre id="asesorOut" class="result"></pre>
+    </div>
+  </div>
+
+  <!-- ============== JS (común) ============== -->
+  <script>
+    const PERIODS = {
+      "2.0TD": { pot: ["P1","P2"], ene: ["E1","E2","E3"] },
+      "3.0TD": { pot: ["P1","P2","P3","P4","P5","P6"], ene: ["E1","E2","E3","E4","E5","E6"] },
+      "6.1TD": { pot: ["P1","P2","P3","P4","P5","P6"], ene: ["E1","E2","E3","E4","E5","E6"] }
+    };
+    const toNum = v => { const n = parseFloat(String(v).replace(',','.')); return Number.isFinite(n)?n:0; };
+    const outPretty = (data) => (
+`Tarifa: ${data.tarifa}
+
+ACTUAL
+- Potencia anual: ${data.actual.potencia_anual} €
+- Energía anual: ${data.actual.energia_anual} €
+- Fijos: ${data.actual.cargos_fijos_anual} €
+- Imp. Electricidad: ${data.actual.impuesto_electricidad} €
+- IVA: ${data.actual.iva} €
+= Total anual: ${data.actual.total_anual} €  |  Mensual: ${data.actual.total_mensual} €
+
+PROPUESTA
+- Potencia anual: ${data.propuesta.potencia_anual} €
+- Energía anual: ${data.propuesta.energia_anual} €
+- Fijos: ${data.propuesta.cargos_fijos_anual} €
+- Imp. Electricidad: ${data.propuesta.impuesto_electricidad} €
+- IVA: ${data.propuesta.iva} €
+= Total anual: ${data.propuesta.total_anual} €  |  Mensual: ${data.propuesta.total_mensual} €
+
+AHORRO
+- % Ahorro: ${data.ahorro_pct} %
+- Ahorro Mes: ${data.ahorro_mensual} €
+- Ahorro Año: ${data.ahorro_anual} €` );
+  </script>
+
+  <!-- 3) Demo /compare -->
+  <script>
+    const btnCompare = document.getElementById('btnCompare');
+    const cmpOut = document.getElementById('cmpOut');
+
+    btnCompare.addEventListener('click', async () => {
+      cmpOut.textContent = 'Calculando...';
+      const demo = {
+        "tarifa": "2.0TD",
+        "energia_kwh": { "E1": 1632.06, "E2": 999.56, "E3": 982.45 },
+        "potencia_contratada_kw": { "P1": 2.5, "P2": 2.5 },
+        "actual": {
+          "nombre": "Tarifa actual",
+          "precio_potencia": { "P1": 36.257275, "P2": 13.127955 },
+          "precio_energia": { "E1": 0.376, "E2": 0.344, "E3": 0.344 },
+          "cargos_fijos_anual_eur": 14.41
+        },
+        "propuesta": {
+          "nombre": "Nuestra oferta",
+          "precio_potencia": { "P1": 38.93, "P2": 20.69 },
+          "precio_energia": { "E1": 0.098155, "E2": 0.098155, "E3": 0.098155 },
+          "cargos_fijos_anual_eur": 14.41
+        },
+        "impuesto_electricidad_pct": 0.05112,
+        "iva_pct": 0.21
+      };
+      try{
+        const res = await fetch('/compare',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(demo)});
+        const data = await res.json();
+        if(!res.ok) throw new Error(data.detail || 'Error');
+        cmpOut.textContent = outPretty(data);
+      }catch(e){ cmpOut.textContent = 'Error: '+e.message; }
+    });
+  </script>
+
+  <!-- 4) Asesor -->
+  <script>
+    const selTarifa = document.getElementById('asesorTarifa');
+    const potHead = document.getElementById('potHead');
+    const potValues = document.getElementById('potValues');
+    const eneHead = document.getElementById('eneHead');
+    const eneValues = document.getElementById('eneValues');
+    const actPotHead = document.getElementById('actPotHead');
+    const actPotValues = document.getElementById('actPotValues');
+    const actEneHead = document.getElementById('actEneHead');
+    const actEneValues = document.getElementById('actEneValues');
+    const proPotHead = document.getElementById('proPotHead');
+    const proPotValues = document.getElementById('proPotValues');
+    const proEneHead = document.getElementById('proEneHead');
+    const proEneValues = document.getElementById('proEneValues');
+    const asesorFijos = document.getElementById('asesorFijos');
+    const asesorIE = document.getElementById('asesorIE');
+    const asesorIVA = document.getElementById('asesorIVA');
+    const btnAsesorDemo = document.getElementById('btnAsesorDemo');
+    const btnAsesorCalcular = document.getElementById('btnAsesorCalcular');
+    const asesorOut = document.getElementById('asesorOut');
+    const infDireccion = document.getElementById('infDireccion');
+    const infPoblacion = document.getElementById('infPoblacion');
+    const infCIF = document.getElementById('infCIF');
+    const infFecha = document.getElementById('infFecha');
+    const btnAsesorPDF = document.getElementById('btnAsesorPDF');
+    const infCUPS = document.getElementById('infCUPS');
+
+    function renderPeriodInputs(){
+      const t = selTarifa.value;
+      const pots = PERIODS[t].pot;
+      const enes = PERIODS[t].ene;
+      potHead.innerHTML = ['<th>Periodo</th>'].concat(pots.map(p=>`<th>${p}</th>`)).join('');
+      potValues.innerHTML = ['<td style="font-weight:600">kW</td>'].concat(pots.map(p=>`<td><input data-kind="pot_contr" data-key="${p}" type="number" step="0.0001" value="0"></td>`)).join('');
+      eneHead.innerHTML = ['<th>Periodo</th>'].concat(enes.map(e=>`<th>${e}</th>`)).join('');
+      eneValues.innerHTML = ['<td style="font-weight:600">kWh</td>'].concat(enes.map(e=>`<td><input data-kind="ene" data-key="${e}" type="number" step="0.0001" value="0"></td>`)).join('');
+      actPotHead.innerHTML = ['<th>Periodo</th>'].concat(pots.map(p=>`<th>${p}</th>`)).join('');
+      actPotValues.innerHTML = ['<td style="font-weight:600">€/kW·año</td>'].concat(pots.map(p=>`<td><input data-kind="act_pot" data-key="${p}" type="number" step="0.000001" value="0"></td>`)).join('');
+      actEneHead.innerHTML = ['<th>Periodo</th>'].concat(enes.map(e=>`<th>${e}</th>`)).join('');
+      actEneValues.innerHTML = ['<td style="font-weight:600">€/kWh</td>'].concat(enes.map(e=>`<td><input data-kind="act_ene" data-key="${e}" type="number" step="0.000001" value="0"></td>`)).join('');
+      proPotHead.innerHTML = ['<th>Periodo</th>'].concat(pots.map(p=>`<th>${p}</th>`)).join('');
+      proPotValues.innerHTML = ['<td style="font-weight:600">€/kW·año</td>'].concat(pots.map(p=>`<td><input data-kind="pro_pot" data-key="${p}" type="number" step="0.000001" value="0"></td>`)).join('');
+      proEneHead.innerHTML = ['<th>Periodo</th>'].concat(enes.map(e=>`<th>${e}</th>`)).join('');
+      proEneValues.innerHTML = ['<td style="font-weight:600">€/kWh</td>'].concat(enes.map(e=>`<td><input data-kind="pro_ene" data-key="${e}" type="number" step="0.000001" value="0"></td>`)).join('');
+    }
+
+    function setDemoValues(){
+      selTarifa.value = "2.0TD"; renderPeriodInputs();
+      [...document.querySelectorAll('input[data-kind="pot_contr"]')].forEach(inp=>{ inp.value = (inp.dataset.key==="P1"||inp.dataset.key==="P2")?2.5:0; });
+      const eneDemo = {E1:1632.06,E2:999.56,E3:982.45};
+      [...document.querySelectorAll('input[data-kind="ene"]')].forEach(inp=>{ inp.value = eneDemo[inp.dataset.key]||0; });
+      const actPot = {P1:36.257275,P2:13.127955};
+      [...document.querySelectorAll('input[data-kind="act_pot"]')].forEach(inp=>{ inp.value = actPot[inp.dataset.key]||0; });
+      const actEne = {E1:0.376,E2:0.344,E3:0.344};
+      [...document.querySelectorAll('input[data-kind="act_ene"]')].forEach(inp=>{ inp.value = actEne[inp.dataset.key]||0; });
+      const proPot = {P1:38.93,P2:20.69};
+      [...document.querySelectorAll('input[data-kind="pro_pot"]')].forEach(inp=>{ inp.value = proPot[inp.dataset.key]||0; });
+      const proEne = {E1:0.098155,E2:0.098155,E3:0.098155};
+      [...document.querySelectorAll('input[data-kind="pro_ene"]')].forEach(inp=>{ inp.value = proEne[inp.dataset.key]||0; });
+      asesorFijos.value = 14.41; asesorIE.value = 0.05112; asesorIVA.value = 0.21;
+    }
+
+    function buildMap(selector){
+    const out = {};
+    document.querySelectorAll(selector).forEach(inp => { out[inp.dataset.key] = toNum(inp.value); });
+    return out;
+  }
+
+  function buildAsesorPayload(includeSuministro=false) {
+    const tarifa = selTarifa.value;
+    const energia_kwh = buildMap('input[data-kind="ene"]');
+    const potencia_contratada_kw = buildMap('input[data-kind="pot_contr"]');
+    const actual_precio_potencia = buildMap('input[data-kind="act_pot"]');
+    const actual_precio_energia = buildMap('input[data-kind="act_ene"]');
+    const propuesta_precio_potencia = buildMap('input[data-kind="pro_pot"]');
+    const propuesta_precio_energia = buildMap('input[data-kind="pro_ene"]');
+
+    const payload = {
+      tarifa,
+      energia_kwh,
+      potencia_contratada_kw,
+      actual: {
+        nombre: "Tarifa actual",
+        precio_potencia: actual_precio_potencia,
+        precio_energia: actual_precio_energia,
+        cargos_fijos_anual_eur: toNum(asesorFijos.value)
+      },
+      propuesta: {
+        nombre: "Nuestra oferta",
+        precio_potencia: propuesta_precio_potencia,
+        precio_energia: propuesta_precio_energia,
+        cargos_fijos_anual_eur: toNum(asesorFijos.value)
+      },
+      impuesto_electricidad_pct: toNum(asesorIE.value),
+      iva_pct: toNum(asesorIVA.value)
+    };
+
+    if (includeSuministro) {
+      payload.suministro = {
+        direccion: infDireccion.value || "",
+        poblacion: infPoblacion.value || "",
+        cif: infCIF.value || "",
+        fecha_estudio: infFecha.value || new Date().toISOString().slice(0,10),
+        nombre_cliente: (document.getElementById('infNombre')?.value || ""),
+        cups: infCUPS.value || ""
+      };
+    }
+    return payload;
+  }
+
+  async function calcularAsesor(){
+    asesorOut.textContent = 'Calculando...';
+    try {
+      const payload = buildAsesorPayload(false);
+      const res = await fetch('/compare', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+      const data = await res.json();
+      if(!res.ok) throw new Error(data.detail || 'Error');
+      asesorOut.textContent = outPretty(data);
+    } catch (e) {
+      asesorOut.textContent = 'Error: ' + e.message;
+    }
+  }
+
+  async function generarPDFAsesor(){
+    try {
+      const payload = buildAsesorPayload(true);
+      const res = await fetch('/compare-report', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+      if(!res.ok){
+        let msg = 'Error al generar PDF';
+        try { const j = await res.json(); msg = j.detail || msg; } catch {}
+        throw new Error(msg);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank'); // abre el PDF en nueva pestaña
+    } catch (e) {
+      alert(e.message);
+    }
+  }
+
+    selTarifa.addEventListener('change', renderPeriodInputs);
+    renderPeriodInputs();
+    setDemoValues();
+    document.getElementById('btnAsesorDemo').addEventListener('click', setDemoValues);
+    document.getElementById('btnAsesorCalcular').addEventListener('click', calcularAsesor);
+    document.getElementById('btnAsesorCalcular').addEventListener('click', calcularAsesor);
+    btnAsesorPDF.addEventListener('click', generarPDFAsesor);
+  </script>
+
+  <!-- Subida (bloque 1) -->
+  <script>
+    const formUpload = document.getElementById('formUpload');
+    const uploadResult = document.getElementById('uploadResult');
+    formUpload.addEventListener('submit', async (e)=>{
+      e.preventDefault();
+      uploadResult.textContent = 'Subiendo...';
+      const fd = new FormData(formUpload);
+      try{
+        const res = await fetch('/upload',{method:'POST',body:fd});
+        const data = await res.json();
+        if(!res.ok) throw new Error(data.detail || 'Error al subir');
+        uploadResult.textContent = `OK: ${data.mensaje} (archivo: ${data.archivo}, tamaño: ${data.tamano_mb} MB)`;
+      }catch(err){ uploadResult.textContent = 'Error: '+err.message; }
+    });
+  </script>
+  <script>
+  // --- Ofertas desde el servidor ---
+  const ofertaSelect = document.getElementById('ofertaSelect');
+  let OFFERS_CACHE = {};
+
+  async function loadOffers() {
+    try {
+      const res = await fetch('/offers');
+      OFFERS_CACHE = await res.json();
+      refreshOfferOptions();
+    } catch (e) {
+      // si falla, dejamos "Manual"
+      OFFERS_CACHE = {};
+      refreshOfferOptions();
+    }
+  }
+
+  function refreshOfferOptions() {
+    const t = selTarifa.value;
+    ofertaSelect.innerHTML = '<option value="">— Manual —</option>';
+    for (const [key, off] of Object.entries(OFFERS_CACHE)) {
+      if (off.tarifas && off.tarifas[t]) {
+        const opt = document.createElement('option');
+        opt.value = key;
+        opt.textContent = off.label || key;
+        ofertaSelect.appendChild(opt);
+      }
+    }
+  }
+
+  function applySelectedOffer() {
+    const key = ofertaSelect.value;
+    const t = selTarifa.value;
+    if (!key || !OFFERS_CACHE[key] || !OFFERS_CACHE[key].tarifas[t]) return;
+    const cfg = OFFERS_CACHE[key].tarifas[t];
+
+    // Rellenar precios de PROPESTA (potencia)
+    document.querySelectorAll('input[data-kind="pro_pot"]').forEach(inp => {
+      const p = inp.dataset.key; // P1..P6
+      const val = cfg.potencia ? cfg.potencia[p] : undefined;
+      if (typeof val === 'number') inp.value = val;
+    });
+
+    // Rellenar precios de PROPESTA (energía) -> E1..E6
+    document.querySelectorAll('input[data-kind="pro_ene"]').forEach(inp => {
+      const e = inp.dataset.key; // E1..E6
+      const val = cfg.energia ? cfg.energia[e] : undefined;
+        if (typeof val === 'number') inp.value = val;
+      });
+    }
+
+    // Cuando cambia la tarifa, filtramos ofertas disponibles
+    selTarifa.addEventListener('change', () => {
+      renderPeriodInputs();
+      refreshOfferOptions();
+      // Si había oferta seleccionada y existe para la nueva tarifa, la aplicamos
+      applySelectedOffer();
+    });
+
+    // Cuando cambia la oferta, aplicamos precios
+    ofertaSelect.addEventListener('change', applySelectedOffer);
+
+    // Al iniciar la página
+    renderPeriodInputs();
+    await loadOffers();   // carga catálogo del servidor
+    setDemoValues();      // para que el resultado sea igual que el botón DEMO
+    refreshOfferOptions();
+  </script>
+
+</body>
+</html>
+
