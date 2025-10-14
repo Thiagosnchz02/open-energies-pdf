@@ -1,0 +1,13 @@
+# Entorno virtual y cachés de Python
+.venv/
+__pycache__/
+*.pyc
+
+# Archivos de Git y configuración de IDE
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Carpetas de datos que no deben ir en la imagen
+data/

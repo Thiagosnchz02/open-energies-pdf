@@ -1,467 +1,52 @@
-# server.py
+# server.py (versión final refactorizada)
 from __future__ import annotations
 
 import os
-import sys
-import uuid
 import asyncio
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Literal, Optional
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import HTMLResponse, Response
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
-from typing import Dict, Literal
-from pydantic import conlist
-from fastapi import APIRouter
-import json
-import html as html_escape  # para escapar textos en el HTML
+from fastapi import FastAPI, Response, Depends, Security, HTTPException
+from fastapi.security import APIKeyHeader
+from pydantic import BaseModel
+import html
+import io
 import base64
 
+# Importaciones para gráficos
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter, MaxNLocator
 
-IS_WINDOWS = sys.platform.startswith("win")
+# Importaciones para PDF con Playwright
+from playwright.async_api import async_playwright, Browser as AsyncBrowser, Playwright as AsyncPlaywright
 
-# --- Playwright imports y tipos según SO ---
-if IS_WINDOWS:
-    # Windows: API síncrona (la corremos en un hilo)
-    from playwright.sync_api import (
-        sync_playwright,
-        Browser as SyncBrowser,
-        Playwright as SyncPlaywright,
-    )
-    _sync_pw: Optional[SyncPlaywright] = None
-    _sync_browser: Optional[SyncBrowser] = None
-else:
-    # Linux/Mac: API asíncrona
-    from playwright.async_api import (
-        async_playwright,
-        Browser as AsyncBrowser,
-        Playwright as AsyncPlaywright,
-    )
-    _pw: Optional[AsyncPlaywright] = None
-    _browser: Optional[AsyncBrowser] = None
+# ===================== CONFIGURACIÓN Y SEGURIDAD =====================
 
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN")
+api_key_header = APIKeyHeader(name="X-Internal-Auth-Token", auto_error=True)
 
-# ====== CATÁLOGO DE OFERTAS (servidor) ======
-# Estructura:
-# OFFERS[clave]["label"]
-# OFFERS[clave]["tarifas"][TARIFA]["potencia"][P1..P6]  -> €/kW·año
-# OFFERS[clave]["tarifas"][TARIFA]["energia"][E1..E6]   -> €/kWh
-OFFERS = {
-    "PELITO_ECO": {
-        "label": "Tarifa Pelito Eco",
-        "tarifas": {
-            "2.0TD": {
-                "potencia": {"P1": 38.93, "P2": 20.69},
-                "energia": {"E1": 0.098155, "E2": 0.098155, "E3": 0.098155}
-            },
-            # "3.0TD": { "potencia": { "P1": 20.76988, "P2": 14.781919, "P3": 8.005384, "P4": 7.106183, "P5": 5.399377, "P6": 3.63993 },
-            #           "energia":  { "E1": 0.128, "E2": 0.128, "E3": 0.110, "E4": 0.110, "E5": 0.105, "E6": 0.110 } },
-            # "6.1TD": { ... }
-        }
-    },
-    "VERSATIL": {
-        "label": "Tarifa Versátil",
-        "tarifas": {
-            "2.0TD": {
-                "potencia": {"P1": 34.17266, "P2": 3.124359},
-                "energia": {"E1": 0.170, "E2": 0.123, "E3": 0.123}
-            },
-            # "3.0TD": { "potencia": { "P1": 20.76988, "P2": 14.781919, "P3": 8.005384, "P4": 7.106183, "P5": 5.399377, "P6": 3.63993 },
-            #           "energia":  { "E1": 0.170, "E2": 0.123, "E3": 0.123, "E4": 0.105, "E5": 0.105, "E6": 0.105 } },
-        }
-    },
-    "PERSONALIZADA": {
-        "label": "Tarifa Personalizada",
-        "tarifas": {
-            "2.0TD": {
-                "potencia": {"P1": 34.67266, "P2": 4.424359},
-                "energia": {"E1": 0.15891, "E2": 0.15891, "E3": 0.15891}
-            }
-        }
-    }
-}
+async def get_api_key(api_key: str = Security(api_key_header)):
+    """Dependencia de FastAPI para validar el token de autenticación."""
+    if not INTERNAL_API_TOKEN or api_key != INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid or missing API Key")
 
-async def _render_html_to_pdf(html: str) -> bytes:
-    """Convierte HTML en PDF usando el navegador ya abierto (Windows/Linux)."""
-    if IS_WINDOWS:
-        def _render_sync(html: str) -> bytes:
-            page = _sync_browser.new_page()
-            page.set_content(html, wait_until="networkidle")
-            pdf = page.pdf(format="A4", print_background=True, margin={"top": "12mm", "bottom": "15mm", "left": "12mm", "right": "12mm"})
-            page.close()
-            return pdf
-        return await asyncio.to_thread(_render_sync, html)
-    else:
-        page = await _browser.new_page()
-        await page.set_content(html, wait_until="networkidle")
-        pdf = await page.pdf(format="A4", print_background=True, margin={"top": "12mm", "bottom": "15mm", "left": "12mm", "right": "12mm"})
-        await page.close()
-        return pdf
-    
+_pw: Optional[AsyncPlaywright] = None
+_browser: Optional[AsyncBrowser] = None
 
-def _img_b64(path: Path, mime: str = "image/png") -> str:
-    if not path.exists():
-        return ""
-    data = path.read_bytes()
-    return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
-
-def _build_report_html(info: SuministroInfo, res: CompareResult) -> str:
-    titulo = f"Informe comparativa — {res.tarifa}"
-    cliente   = html_escape.escape(info.nombre_cliente or "")
-    direccion = html_escape.escape(info.direccion)
-    poblacion = html_escape.escape(info.poblacion)
-    cif       = html_escape.escape(info.cif)
-    cups      = html_escape.escape(info.cups)
-    fecha     = html_escape.escape(info.fecha_estudio)
-
-    ah_pct, ah_eur, ah_mes = res.ahorro_pct, res.ahorro_anual, res.ahorro_mensual
-
-    # logo inline (base64). Si no existe, no se muestra.
-    logo_src = _img_b64(TEMPLATES_DIR / "logo_openenergies.png")
-
-    return f"""<!doctype html>
-<html lang="es">
-<head>
-  <meta charset="utf-8" />
-  <title>{titulo}</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2"></script>
-  <style>
-    :root {{
-      --ink:#0b1324;
-      --muted:#64748b;
-      --border:#e2e8f0;
-      --bg:#ecfdf5;
-      --brand:#10b981;
-      --brand-strong:#059669;
-      --brand-weak:#d1fae5;
-    }}
-    * {{ box-sizing:border-box }}
-    body {{ font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; color:var(--ink); background:#fff; }}
-    .wrap {{ padding: 22px 24px; }}
-    .header {{
-      display:flex; justify-content:space-between; align-items:center; gap:16px;
-      border:1px solid var(--border); border-radius:16px;
-      background:linear-gradient(180deg, var(--bg), #ffffff);
-      padding:10px 14px;
-    }}
-    .brand {{ font-weight:800; font-size:18px; color:var(--brand); letter-spacing:.2px }}
-    .h1 {{ font-size:22px; font-weight:800; margin:4px 0 2px }}
-    .muted {{ color:var(--muted); font-size:12px }}
-    .pill {{
-      display:inline-block; background:var(--brand-weak); color:var(--brand-strong);
-      padding:6px 10px; border-radius:999px; font-size:12px; font-weight:800
-    }}
-    .card {{ border:1px solid var(--border); border-radius:16px; background:#fff; padding:14px; margin-top:12px; }}
-    .grid2 {{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }}
-    .kpi {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }}
-    .kpi .box {{ border:1px solid var(--border); border-radius:12px; padding:10px 12px; background:#fff; }}
-    .kpi .label {{ font-size:12px; color:var(--muted) }}
-    .kpi .val {{ font-size:18px; font-weight:800 }}
-    table {{ width:100%; border-collapse:separate; border:1px solid var(--border); border-radius:12px; overflow:hidden; border-spacing:0; }}
-    th, td {{ padding:8px 10px; border-bottom:1px solid var(--border); font-size:12px; text-align:left; }}
-    th {{ background:#f8fafc; font-weight:700 }}
-    tr:last-child td {{ border-bottom:0 }}
-    .logo {{ height:56px; width:auto; object-fit:contain; margin-right:10px }}
-    .head-left {{ display:flex; align-items:center; gap:12px }}
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="header">
-      <div class="head-left">
-        {f'<img class="logo" src="{logo_src}" alt="Logo" />' if logo_src else ''}
-        <div>
-          <div class="brand">Open Energies</div>
-          <div class="h1">{titulo}</div>
-          <div class="muted">Fecha de estudio: {fecha}</div>
-        </div>
-      </div>
-      <div style="text-align:right">
-        <div class="pill">{ah_pct}% ahorro</div>
-        <div class="muted" style="margin-top:6px">Ahorro mes: <b>{ah_mes} €</b> · Ahorro año: <b>{ah_eur} €</b></div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="grid2">
-        <div>
-          <div style="font-weight:700; margin-bottom:4px">Datos del suministro</div>
-          <div class="muted">{cliente}</div>
-          <div class="muted">{direccion}</div>
-          <div class="muted">{poblacion}</div>
-          <div class="muted">CUPS: {cups}</div>
-          <div class="muted">CIF: {cif}</div>
-        </div>
-        <div class="kpi">
-          <div class="box"><div class="label">Total anual (Actual)</div><div class="val">{res.actual.total_anual} €</div></div>
-          <div class="box"><div class="label">Total anual (Propuesta)</div><div class="val">{res.propuesta.total_anual} €</div></div>
-          <div class="box"><div class="label">Ahorro anual</div><div class="val">{res.ahorro_anual} €</div></div>
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div style="font-weight:700; margin-bottom:8px">Desglose por conceptos</div>
-      <table>
-        <thead>
-          <tr><th>Concepto</th><th>Actual</th><th>Propuesta</th></tr>
-        </thead>
-        <tbody>
-          <tr><td>Potencia</td><td>{res.actual.potencia_anual} €</td><td>{res.propuesta.potencia_anual} €</td></tr>
-          <tr><td>Energía</td><td>{res.actual.energia_anual} €</td><td>{res.propuesta.energia_anual} €</td></tr>
-          <tr><td>Fijos</td><td>{res.actual.cargos_fijos_anual} €</td><td>{res.propuesta.cargos_fijos_anual} €</td></tr>
-          <tr><td>Impuesto electricidad</td><td>{res.actual.impuesto_electricidad} €</td><td>{res.propuesta.impuesto_electricidad} €</td></tr>
-          <tr><td>IVA</td><td>{res.actual.iva} €</td><td>{res.propuesta.iva} €</td></tr>
-          <tr><th>Total</th><th>{res.actual.total_anual} €</th><th>{res.propuesta.total_anual} €</th></tr>
-        </tbody>
-      </table>
-    </div>
-
-    <div class="card">
-      <div class="muted" style="margin-bottom:6px">Totales anuales y ahorro</div>
-      <canvas id="chartTotals" width="560" height="340"></canvas>
-    </div>
-  </div>
-
-  <!-- SCRIPT del gráfico con margen y etiquetas controladas -->
-  <script>
-    const totalActual = {res.actual.total_anual};
-    const totalProp   = {res.propuesta.total_anual};
-    const ahorro      = {res.ahorro_anual};
-    const maxVal = Math.max(totalActual, totalProp, Math.abs(ahorro));
-
-    Chart.register(ChartDataLabels);
-
-    new Chart(document.getElementById('chartTotals'), {{
-      type: 'bar',
-      data: {{
-        labels: ['Actual', 'Propuesta', 'Ahorro'],
-        datasets: [{{
-          label: '€',
-          data: [totalActual, totalProp, Math.abs(ahorro)],
-          backgroundColor: ['#86efac', '#34d399', (ahorro >= 0 ? '#10b981' : '#ef4444')],
-          borderColor:    ['#16a34a', '#059669', (ahorro >= 0 ? '#065f46' : '#b91c1c')],
-          borderWidth: 1.5
-        }}]
-      }},
-      options: {{
-        responsive: true,
-        layout: {{ padding: {{ top: 16 }} }},
-        plugins: {{
-          legend: {{ display: false }},
-          datalabels: {{
-            anchor: 'end', align: 'end', offset: -2, clamp: true, clip: false,
-            formatter: (v, ctx) => {{
-              const isAhorro = ctx.dataIndex === 2;
-              const label = isAhorro ? (ahorro >= 0 ? '' : 'Sobre-coste ') : '';
-              return label + v.toLocaleString('es-ES', {{ minimumFractionDigits: 2 }}) + ' €';
-            }},
-            color: '#064e3b', font: {{ weight: '700' }}
-          }}
-        }},
-        scales: {{
-          y: {{ beginAtZero: true, suggestedMax: maxVal * 1.18, grace: '12%' }}
-        }}
-      }}
-    }});
-  </script>
-</body>
-</html>"""
-
-
-# ---------------------------
-# Config básica
-# ---------------------------
 BASE_DIR = Path(__file__).resolve().parent
-UPLOAD_DIR = BASE_DIR / "data" / "uploads"
 TEMPLATES_DIR = BASE_DIR / "templates"
 
-MAX_UPLOAD_MB = 15
-ALLOWED_MIME = {"application/pdf"}
+app = FastAPI(
+    title="Open Energies PDF Generation Service",
+    version="1.1.0",
+    description="Microservicio para generar comparativas energéticas en PDF.",
+)
 
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+# ===================== MODELOS DE DATOS (PYDANTIC) =====================
 
-app = FastAPI(title="Open Energies PDF Service", version="0.1.0")
-app.mount("/static", StaticFiles(directory=TEMPLATES_DIR), name="static")
-
-@app.get("/offers")
-async def list_offers():
-    return OFFERS
-
-# ---------------------------
-# Modelos
-# ---------------------------
-class Margenes(BaseModel):
-    superior: str = "15mm"
-    inferior: str = "15mm"
-    izquierda: str = "12mm"
-    derecha: str = "12mm"
-
-class Opciones(BaseModel):
-    formato: str = "A4"
-    imprimirFondo: bool = True
-    escala: float = 1.0
-    margenes: Margenes = Field(default_factory=Margenes)
-    incluirPie: bool = True
-    pieHtml: str = (
-        "<div style='font-size:10px;width:100%;text-align:center;'>"
-        "Página <span class='pageNumber'></span> de <span class='totalPages'></span>"
-        "</div>"
-    )
-    esperarRedCompleta: bool = True
-
-class PeticionRender(BaseModel):
-    html: str
-    opciones: Opciones = Field(default_factory=Opciones)
-
-# ---------------------------
-# Utilidades
-# ---------------------------
-def _bytes_to_mb(n: int) -> float:
-    return n / (1024 * 1024)
-
-def _safe_filename(original_name: str) -> str:
-    ext = "".join(Path(original_name).suffixes).lower() or ".pdf"
-    if ext != ".pdf":
-        ext = ".pdf"
-    return f"{uuid.uuid4().hex}{ext}"
-
-# ---------------------------
-# Ciclo de vida
-# ---------------------------
-@app.on_event("startup")
-async def startup() -> None:
-    """Arranca Playwright/Chromium según plataforma."""
-    global _pw, _browser, _sync_pw, _sync_browser
-
-    if IS_WINDOWS:
-        # Arrancamos síncrono en un hilo para no pelear con asyncio en Windows
-        def _start_sync():
-            global _sync_pw, _sync_browser
-            _sync_pw = sync_playwright().start()
-            _sync_browser = _sync_pw.chromium.launch()
-        await asyncio.to_thread(_start_sync)
-        print("Chromium (sync) listo en Windows.")
-    else:
-        _pw = await async_playwright().start()
-        _browser = await _pw.chromium.launch(args=["--no-sandbox"])
-        print("Chromium (async) listo.")
-
-@app.on_event("shutdown")
-async def shutdown() -> None:
-    """Cierra navegadores correctamente."""
-    global _pw, _browser, _sync_pw, _sync_browser
-
-    if IS_WINDOWS:
-        def _stop_sync():
-            global _sync_pw, _sync_browser
-            try:
-                if _sync_browser:
-                    _sync_browser.close()
-                if _sync_pw:
-                    _sync_pw.stop()
-            finally:
-                _sync_browser = None
-                _sync_pw = None
-        await asyncio.to_thread(_stop_sync)
-    else:
-        if _browser:
-            await _browser.close()
-            _browser = None
-        if _pw:
-            await _pw.stop()
-            _pw = None
-
-# ---------------------------
-# Rutas
-# ---------------------------
-@app.get("/", response_class=HTMLResponse)
-async def home() -> HTMLResponse:
-    index_path = TEMPLATES_DIR / "index.html"
-    if not index_path.exists():
-        raise HTTPException(status_code=500, detail="Falta templates/index.html")
-    return HTMLResponse(index_path.read_text(encoding="utf-8"))
-
-@app.post("/upload")
-async def upload(documento: UploadFile = File(...)) -> dict:
-    if documento.content_type not in ALLOWED_MIME:
-        raise HTTPException(status_code=400, detail=f"Tipo no permitido: {documento.content_type}")
-
-    data = await documento.read()
-    size_mb = _bytes_to_mb(len(data))
-    if size_mb > MAX_UPLOAD_MB:
-        raise HTTPException(status_code=413, detail=f"Archivo demasiado grande ({size_mb:.1f} MB). Límite {MAX_UPLOAD_MB} MB.")
-
-    safe_name = _safe_filename(documento.filename or "documento.pdf")
-    dest = UPLOAD_DIR / safe_name
-    dest.write_bytes(data)
-    return {"ok": True, "mensaje": "Documento subido correctamente.", "archivo": safe_name, "tamano_mb": round(size_mb, 2)}
-
-@app.post("/render")
-async def render_api(payload: PeticionRender) -> Response:
-    if not payload.html or len(payload.html) < 16:
-        raise HTTPException(status_code=400, detail="HTML vacío o demasiado corto.")
-
-    if IS_WINDOWS:
-        # Render síncrono en un hilo
-        def _render_sync(html: str, opt: Opciones) -> bytes:
-            page = _sync_browser.new_page()
-            page.set_content(html, wait_until="networkidle" if opt.esperarRedCompleta else "domcontentloaded")
-            pdf_bytes = page.pdf(
-                format=opt.formato,
-                print_background=opt.imprimirFondo,
-                scale=opt.escala,
-                margin={
-                    "top": opt.margenes.superior,
-                    "bottom": opt.margenes.inferior,
-                    "left": opt.margenes.izquierda,
-                    "right": opt.margenes.derecha,
-                },
-                display_header_footer=opt.incluirPie,
-                header_template="<div></div>",
-                footer_template=opt.pieHtml if opt.incluirPie else "<div></div>",
-            )
-            page.close()
-            return pdf_bytes
-
-        pdf_bytes = await asyncio.to_thread(_render_sync, payload.html, payload.opciones)
-    else:
-        # Render asíncrono normal
-        page = await _browser.new_page()
-        wait_until = "networkidle" if payload.opciones.esperarRedCompleta else "domcontentloaded"
-        await page.set_content(payload.html, wait_until=wait_until)
-        pdf_bytes = await page.pdf(
-            format=payload.opciones.formato,
-            print_background=payload.opciones.imprimirFondo,
-            scale=payload.opciones.escala,
-            margin={
-                "top": payload.opciones.margenes.superior,
-                "bottom": payload.opciones.margenes.inferior,
-                "left": payload.opciones.margenes.izquierda,
-                "right": payload.opciones.margenes.derecha,
-            },
-            display_header_footer=payload.opciones.incluirPie,
-            header_template="<div></div>",
-            footer_template=payload.opciones.pieHtml if payload.opciones.incluirPie else "<div></div>",
-        )
-        await page.close()
-
-    return Response(
-        content=pdf_bytes,
-        media_type="application/pdf",
-        headers={"Content-Disposition": 'inline; filename=\"documento.pdf\"'}
-    )
-
-@app.post("/render-form")
-async def render_form(html: str = Form(...)) -> Response:
-    payload = PeticionRender(html=html)
-    return await render_api(payload)
-
-# >>> COMPARATIVA (nuevo) >>>
 TarifaLiteral = Literal["2.0TD", "3.0TD", "6.1TD"]
 
 TARIFF_PERIODS = {
@@ -470,34 +55,11 @@ TARIFF_PERIODS = {
     "6.1TD": {"potencia": ["P1", "P2", "P3", "P4", "P5", "P6"], "energia": ["E1", "E2", "E3", "E4", "E5", "E6"]},
 }
 
-
-
 class PlanInput(BaseModel):
     nombre: str = "Plan"
-    # €/kW año por periodo de potencia
     precio_potencia: Dict[str, float]
-    # €/kWh por periodo de energía
     precio_energia: Dict[str, float]
-    # Extras fijos anuales (alquiler contador, etc.)
     cargos_fijos_anual_eur: float = 0.0
-
-class CompareInput(BaseModel):
-    tarifa: TarifaLiteral
-    energia_kwh: Dict[str, float]
-    potencia_contratada_kw: Dict[str, float]
-    potencia_facturada_kw: Dict[str, float] | None = None
-
-    actual: PlanInput
-    propuesta: PlanInput
-
-    impuesto_electricidad_pct: float = 0.05112
-    iva_pct: float = 0.21
-
-    # 🔧 NUEVO: opciones de cálculo
-    unidad_precio_potencia: Literal["eur_kw_anio", "eur_kw_dia"] = "eur_kw_anio"
-    aplicar_ie_solo_a_pot_y_energia: bool = True
-    redondeo_por_linea: bool = True
-    redondear_impuestos: bool = True
 
 class SuministroInfo(BaseModel):
     direccion: str
@@ -505,10 +67,17 @@ class SuministroInfo(BaseModel):
     fecha_estudio: str
     poblacion: str
     cups: str
-    nombre_cliente: str | None = None  # opcional
+    nombre_cliente: Optional[str] = None
 
-class CompareReportInput(CompareInput):
-    suministro: SuministroInfo
+class MonthlyInput(BaseModel):
+    tarifa: TarifaLiteral
+    energia_kwh_mes: Dict[str, list[float]]
+    potencia_contratada_kw: Dict[str, float]
+    actual: PlanInput
+    propuesta: PlanInput
+    iva_pct: float = 0.21
+    impuesto_electricidad_pct: float = 0.05112
+    suministro: Optional[SuministroInfo] = None
 
 class BillBreakdown(BaseModel):
     potencia_anual: float
@@ -527,150 +96,486 @@ class CompareResult(BaseModel):
     ahorro_mensual: float
     ahorro_pct: float
 
-def _round2(n: float) -> float:
-    return round(float(n), 2)
+class MonthlyResult(BaseModel):
+    meses: list[str]
+    energia_actual: list[float]
+    potencia_actual: list[float]
+    energia_propuesta: list[float]
+    potencia_propuesta: list[float]
+    impuestos_actual: list[float]
+    impuestos_propuesta: list[float]
+    resumen: CompareResult
 
-def _validate_periods(tarifa: str, energia_kwh: Dict[str, float], pot_contr: Dict[str, float], pot_fact: Dict[str, float] | None, plan_a: PlanInput, plan_b: PlanInput):
+DEFAULT_MESES = ["ENE","FEB","MAR","ABR","MAY","JUN","JUL","AGO","SEP","OCT","NOV","DIC"]
+
+
+# ===================== LÓGICA DE NEGOCIO Y UTILIDADES =====================
+
+def _compute_bill(tarifa: str, energia_kwh: dict, pot_contr: dict, plan: PlanInput, ie_pct: float, iva_pct: float) -> BillBreakdown:
     cfg = TARIFF_PERIODS[tarifa]
-    def _chk(keys: Dict[str, float], must: list[str], name: str):
-        desconocidos = [k for k in keys.keys() if k not in must]
-        faltantes = [k for k in must if k not in keys]
-        if desconocidos:
-            raise HTTPException(400, detail=f"{name}: periodos no válidos: {desconocidos}. Deben ser {must}")
-        if faltantes:
-            raise HTTPException(400, detail=f"{name}: faltan periodos: {faltantes}. Deben ser {must}")
-
-    _chk(energia_kwh, cfg["energia"], "energia_kwh")
-    _chk(pot_contr, cfg["potencia"], "potencia_contratada_kw")
-    if pot_fact is not None:
-        _chk(pot_fact, cfg["potencia"], "potencia_facturada_kw")
-    _chk(plan_a.precio_energia, cfg["energia"], "actual.precio_energia")
-    _chk(plan_b.precio_energia, cfg["energia"], "propuesta.precio_energia")
-    _chk(plan_a.precio_potencia, cfg["potencia"], "actual.precio_potencia")
-    _chk(plan_b.precio_potencia, cfg["potencia"], "propuesta.precio_potencia")
-
-def _compute_bill(
-    tarifa: str,
-    energia_kwh: Dict[str, float],
-    pot_contr: Dict[str, float],
-    pot_fact: Dict[str, float] | None,
-    plan: PlanInput,
-    imp_elec_pct: float,
-    iva_pct: float,
-    unidad_precio_potencia: str = "eur_kw_anio",
-    aplicar_ie_solo_a_pot_y_energia: bool = True,
-    redondeo_por_linea: bool = True,
-    redondear_impuestos: bool = True,
-) -> BillBreakdown:
-    cfg = TARIFF_PERIODS[tarifa]
-    pot_base = pot_fact or pot_contr
-
-    factor_pot = 365.0 if unidad_precio_potencia == "eur_kw_dia" else 1.0
-
-    # Potencia por periodo
-    pot_importes = []
-    for p in cfg["potencia"]:
-        importe = float(pot_base.get(p, 0.0)) * float(plan.precio_potencia.get(p, 0.0)) * factor_pot
-        pot_importes.append(round(importe, 2) if redondeo_por_linea else importe)
-    pot_total = sum(pot_importes)
-
-    # Energía por periodo
-    ene_importes = []
-    for e in cfg["energia"]:
-        importe = float(energia_kwh.get(e, 0.0)) * float(plan.precio_energia.get(e, 0.0))
-        ene_importes.append(round(importe, 2) if redondeo_por_linea else importe)
-    ene_total = sum(ene_importes)
-
-    base = float(pot_total) + float(ene_total) + float(plan.cargos_fijos_anual_eur)
-
-    base_ie = (float(pot_total) + float(ene_total)) if aplicar_ie_solo_a_pot_y_energia else base
-    imp_elec_calc = base_ie * float(imp_elec_pct)
-    imp_elec = round(imp_elec_calc, 2) if redondear_impuestos else imp_elec_calc
-
-    iva_calc = (base + imp_elec) * float(iva_pct)
-    iva = round(iva_calc, 2) if redondear_impuestos else iva_calc
-
-    total = base + imp_elec + iva
+    
+    pot_total = sum(float(pot_contr.get(p, 0.0)) * float(plan.precio_potencia.get(p, 0.0)) for p in cfg["potencia"])
+    ene_total = sum(float(energia_kwh.get(e, 0.0)) * float(plan.precio_energia.get(e, 0.0)) for e in cfg["energia"])
+    
+    # Base para el Impuesto Eléctrico (solo potencia y energía)
+    base_impuestos = pot_total + ene_total
+    imp_elec = base_impuestos * ie_pct
+    
+    # Base para el IVA (incluye todo lo anterior + cargos fijos)
+    base_iva = base_impuestos + imp_elec + plan.cargos_fijos_anual_eur
+    iva = base_iva * iva_pct
+    
+    total = base_iva + iva
 
     return BillBreakdown(
-        potencia_anual=_round2(pot_total),
-        energia_anual=_round2(ene_total),
-        cargos_fijos_anual=_round2(plan.cargos_fijos_anual_eur),
-        impuesto_electricidad=_round2(imp_elec),
-        iva=_round2(iva),
-        total_anual=_round2(total),
-        total_mensual=_round2(total / 12.0),
+        potencia_anual=round(pot_total, 2),
+        energia_anual=round(ene_total, 2),
+        cargos_fijos_anual=round(plan.cargos_fijos_anual_eur, 2),
+        impuesto_electricidad=round(imp_elec, 2),
+        iva=round(iva, 2),
+        total_anual=round(total, 2),
+        total_mensual=round(total / 12.0, 2),
     )
 
-@app.post("/compare", response_model=CompareResult)
-async def compare(payload: CompareInput) -> CompareResult:
-    """Calcula totales 'actual' vs 'propuesta' y devuelve ahorros."""
-    _validate_periods(
-        payload.tarifa,
-        payload.energia_kwh,
-        payload.potencia_contratada_kw,
-        payload.potencia_facturada_kw,
-        payload.actual,
-        payload.propuesta,
+# FUNCIÓN PRINCIPAL REEMPLAZADA
+def compute_monthly_from_sips(inp: MonthlyInput) -> MonthlyResult:
+    cfg = TARIFF_PERIODS[inp.tarifa]
+    periods_e, periods_p = cfg["energia"], cfg["potencia"]
+
+    # (Las validaciones iniciales no cambian)
+    for p in periods_e:
+        if p not in inp.energia_kwh_mes or len(inp.energia_kwh_mes[p]) != 12:
+            raise HTTPException(400, detail=f"{p} debe tener 12 valores (1 por mes)")
+    for p in periods_p:
+        if p not in inp.potencia_contratada_kw:
+            raise HTTPException(400, detail=f"Falta potencia contratada para {p}")
+
+    # --- Cálculos para el gráfico mensual (sin cambios) ---
+    ener_a, ener_b = [0.0]*12, [0.0]*12
+    # ... (el bucle `for e in periods_e:` se mantiene igual)
+    for e in periods_e:
+        pe_a = float(inp.actual.precio_energia.get(e, 0.0))
+        pe_b = float(inp.propuesta.precio_energia.get(e, 0.0))
+        kwh_list = [float(x or 0) for x in inp.energia_kwh_mes[e]]
+        for i in range(12):
+            ener_a[i] += kwh_list[i] * pe_a
+            ener_b[i] += kwh_list[i] * pe_b
+
+    pot_anual_a = sum(float(inp.potencia_contratada_kw.get(p,0.0)) * float(inp.actual.precio_potencia.get(p,0.0)) for p in periods_p)
+    pot_anual_b = sum(float(inp.potencia_contratada_kw.get(p,0.0)) * float(inp.propuesta.precio_potencia.get(p,0.0)) for p in periods_p)
+    pot_mes_a, pot_mes_b = pot_anual_a/12.0, pot_anual_b/12.0
+    pot_a, pot_b = [pot_mes_a]*12, [pot_mes_b]*12
+
+    iva_pct, ie_pct = float(inp.iva_pct), float(inp.impuesto_electricidad_pct)
+    imp_a, imp_b = [], []
+    for i in range(12):
+        base_a = ener_a[i] + pot_a[i]
+        imp_elec_a = base_a * ie_pct
+        iva_a = (base_a + imp_elec_a) * iva_pct
+        imp_a.append(imp_elec_a + iva_a)
+
+        base_b = ener_b[i] + pot_b[i]
+        imp_elec_b = base_b * ie_pct
+        iva_b = (base_b + imp_elec_b) * iva_pct
+        imp_b.append(imp_elec_b + iva_b)
+        
+    # --- ¡CAMBIO CLAVE! Usamos la nueva función para un cálculo anual preciso ---
+    total_kwh_anual = {e: sum(inp.energia_kwh_mes.get(e, [])) for e in periods_e}
+    
+    actual_bill = _compute_bill(inp.tarifa, total_kwh_anual, inp.potencia_contratada_kw, inp.actual, ie_pct, iva_pct)
+    propuesta_bill = _compute_bill(inp.tarifa, total_kwh_anual, inp.potencia_contratada_kw, inp.propuesta, ie_pct, iva_pct)
+    
+    ahorro_anual = actual_bill.total_anual - propuesta_bill.total_anual
+    ahorro_pct = (ahorro_anual / actual_bill.total_anual * 100.0) if actual_bill.total_anual > 0 else 0.0
+
+    resumen = CompareResult(
+        tarifa=inp.tarifa,
+        actual=actual_bill,
+        propuesta=propuesta_bill,
+        ahorro_anual=round(ahorro_anual, 2),
+        ahorro_mensual=round(ahorro_anual / 12.0, 2),
+        ahorro_pct=round(ahorro_pct, 2),
     )
 
-    actual = _compute_bill(
-        payload.tarifa,
-        payload.energia_kwh,
-        payload.potencia_contratada_kw,
-        payload.potencia_facturada_kw,
-        payload.actual,
-        payload.impuesto_electricidad_pct,
-        payload.iva_pct,
-        payload.unidad_precio_potencia,
-        payload.aplicar_ie_solo_a_pot_y_energia,
-        payload.redondeo_por_linea,
-        payload.redondear_impuestos,
+    return MonthlyResult(
+        meses=DEFAULT_MESES,
+        energia_actual=[round(x,2) for x in ener_a],
+        potencia_actual=[round(x,2) for x in pot_a],
+        energia_propuesta=[round(x,2) for x in ener_b],
+        potencia_propuesta=[round(x,2) for x in pot_b],
+        impuestos_actual=[round(x,2) for x in imp_a],
+        impuestos_propuesta=[round(x,2) for x in imp_b],
+        resumen=resumen,
     )
+    
 
-    propuesta = _compute_bill(
-        payload.tarifa,
-        payload.energia_kwh,
-        payload.potencia_contratada_kw,
-        payload.potencia_facturada_kw,
-        payload.propuesta,
-        payload.impuesto_electricidad_pct,
-        payload.iva_pct,
-        payload.unidad_precio_potencia,
-        payload.aplicar_ie_solo_a_pot_y_energia,
-        payload.redondeo_por_linea,
-        payload.redondear_impuestos,
-    )
+def make_monthly_bar_chart_dual(meses: list[str], ener_actual: list[float], pot_actual: list[float], imp_actual: list[float], ener_prop: list[float], pot_prop: list[float], imp_prop: list[float]) -> str:
+    colores = { "imp": "#2E2E2E", "ener_actual": "#BDC3C7", "pot_actual": "#7F8C8D", "ener_prop": "#A3D9A5", "pot_prop": "#57A773" }
+    width, gap, group_space = 0.50, 0.05, 1.50
+    x = np.arange(12) * group_space
+    left_x, right_x = x - (width/2 + gap/2), x + (width/2 + gap/2)
 
-    ahorro_anual = _round2(actual.total_anual - propuesta.total_anual)
-    ahorro_mensual = _round2(ahorro_anual / 12.0)
-    ahorro_pct = _round2( (ahorro_anual / actual.total_anual) * 100.0 if actual.total_anual > 0 else 0.0 )
+    impA, pa, ea = np.array(imp_actual), np.array(pot_actual), np.array(ener_actual)
+    impB, pb, eb = np.array(imp_prop), np.array(pot_prop), np.array(ener_prop)
 
-    return CompareResult(
-        tarifa=payload.tarifa,
-        actual=actual,
-        propuesta=propuesta,
-        ahorro_anual=ahorro_anual,
-        ahorro_mensual=ahorro_mensual,
-        ahorro_pct=ahorro_pct,
-    )
-# <<< COMPARATIVA (nuevo) <<<
+    fig, ax = plt.subplots(figsize=(12, 5), constrained_layout=False)
+    ax.bar(left_x, impB, width=width, label="Impuestos", color=colores["imp"])
+    ax.bar(left_x, pb, width=width, bottom=impB, label="Oferta: Potencia", color=colores["pot_prop"])
+    ax.bar(left_x, eb, width=width, bottom=impB + pb, label="Oferta: Energía", color=colores["ener_prop"])
+    ax.bar(right_x, impA, width=width, color=colores["imp"], label="_nolegend_")
+    ax.bar(right_x, pa, width=width, bottom=impA, label="Actual: Potencia", color=colores["pot_actual"])
+    ax.bar(right_x, ea, width=width, bottom=impA + pa, label="Actual: Energía", color=colores["ener_actual"])
 
-@app.post("/compare-report")
-async def compare_report(payload: CompareReportInput):
+    fig.suptitle("SIMULACIÓN MENSUAL (Oferta vs Actual)", y=0.98, fontsize=13, fontweight="bold")
+    ax.annotate("", xy=(0, 1.03), xytext=(1, 1.03), xycoords="axes fraction", arrowprops=dict(arrowstyle="-", lw=0.8, color="#BDBDBD"))
+    ax.legend(ncol=5, loc="lower center", bbox_to_anchor=(0.5, 1.065), frameon=False, borderaxespad=0.0, columnspacing=1.4, handlelength=1.8, fontsize=10)
+
+    ax.set_xticks(x); ax.set_xticklabels(meses)
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, pos: f"{int(round(v))}€"))
+    ax.grid(axis="y", linestyle=":", linewidth=0.5)
+    ax.set_xlim(x[0] - group_space + width + gap/2, x[-1] + group_space - width - gap/2)
+    plt.subplots_adjust(left=0.08, right=0.98, bottom=0.12, top=0.82)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=160); plt.close(fig)
+    return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('ascii')}"
+
+def _img_b64(path: Path, mime: str = "image/png") -> str:
+    if not path.exists(): return ""
+    return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+
+def _build_report_html(
+    info: SuministroInfo,
+    res: CompareResult,
+    iva_pct: float,
+    chart_url: Optional[str] = None,
+    actual_plan: Optional[PlanInput] = None,
+    propuesta_plan: Optional[PlanInput] = None,
+    **_    # ignora kwargs extra
+) -> str:
+    logo_src = _img_b64(TEMPLATES_DIR / "logo_openenergies.png")
+
+    # ---------- helpers robustos (idénticos en espíritu) ----------
+    import html as _html, re
+
+    def _fmt_number(n) -> str:
+        """2 decimales estilo ES, tolerante a str/None/€, comas, espacios."""
+        if n is None:
+            x = 0.0
+        else:
+            try:
+                x = float(n)
+            except (TypeError, ValueError):
+                s = str(n).replace("€", "").replace(" ", "").strip()
+                s = s.replace(",", ".")
+                try:
+                    x = float(s)
+                except Exception:
+                    return _html.escape(str(n))
+        return f"{x:,.2f}".replace(",", " ").replace(".", ",")
+
+    def _as_dict(plan) -> dict:
+        if plan is None:
+            return {}
+        if isinstance(plan, dict):
+            return plan
+        if hasattr(plan, "model_dump"):
+            return plan.model_dump()
+        if hasattr(plan, "dict"):
+            return plan.dict()
+        return getattr(plan, "__dict__", {}) or {}
+
+    def _sorted_items(d: dict) -> list[tuple[str, float]]:
+        def key(k: str):
+            m = re.match(r"^[PE](\d+)$", k.strip().upper())
+            return (k[0], int(m.group(1))) if m else (k, 0)
+        return sorted(d.items(), key=lambda kv: key(kv[0]))
+
+    # Grids de P1..P6 / E1..E6 (sin €)
+    def _grid_row(prefix: str, values: dict) -> str:
+        order = [f"{prefix}{i}" for i in range(1, 7)]
+        cells = []
+        for k in order:
+            v = values.get(k)
+            txt = _fmt_number(v) if v is not None else "—"
+            cells.append(f"<div class='cell'><span class='cell-k'>{k}:</span> <span class='cell-v'>{txt}</span></div>")
+        return "<div class='grid-row'>" + "".join(cells) + "</div>"
+
+    def _grid_block(title: str, prefix: str, values: dict) -> str:
+        return f"""
+        <div class="grid-block">
+          <div class="grid-title">{title}</div>
+          {_grid_row(prefix, values or {})}
+        </div>
+        """
+
+    def _precios_col(plan: Optional[PlanInput], titulo: str) -> str:
+        d = _as_dict(plan)
+        if not d:
+            return ""
+        pot = d.get("precio_potencia", {}) or {}
+        ene = d.get("precio_energia", {}) or {}
+        return f"""
+        <div class="price-card">
+          <div class="price-card__title">{titulo}</div>
+          {_grid_block("Potencia (€/kW·año)", "P", dict(_sorted_items(pot)))}
+          {_grid_block("Energía (€/kWh)", "E", dict(_sorted_items(ene)))}
+        </div>
+        """
+
+    precios_block = ""
+    if actual_plan or propuesta_plan:
+        precios_block = f"""
+        <div class="section-title">Comparativa de precios (Actual vs Propuesta)</div>
+        <div class="compare-grid">
+          {_precios_col(actual_plan, "Actual")}
+          {_precios_col(propuesta_plan, "Propuesta")}
+        </div>
+        """
+
+    # ---------- datos saneados para cabecera ----------
+    cliente   = _html.escape(info.nombre_cliente or "-")
+    direccion = _html.escape(info.direccion)
+    poblacion = _html.escape(info.poblacion)
+    cif       = _html.escape(info.cif)
+    cups      = _html.escape(info.cups)
+    fecha     = _html.escape(info.fecha_estudio)
+    ah_pct, ah_eur, ah_mes = res.ahorro_pct, res.ahorro_anual, res.ahorro_mensual
+
+    # ---------- HTML ----------
+    return f"""
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Informe Comparativa Open Energies</title>
+  <style>
+    :root {{
+      --ink:#1f2937; --muted:#6b7280; --border:#e5e7eb;
+      --brand:#2BB673; --brandDark:#166534;
+      --headGradA:#ecfdf5; --headGradB:#e6faf1; /* verde suave del header */
+      --bgHead:#ecfdf5;  /* encabezado de tabla verdoso */
+      --ok:#16a34a; --bad:#dc2626;
+    }}
+    * {{ box-sizing:border-box; }}
+    body {{
+      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+      color:var(--ink); background:#fff; margin:0; padding:0; font-size:10px;
+    }}
+    .page {{ padding:16mm 12mm; }}
+
+    /* HEADER completo verde (fijo para que no cambie comportamiento) */
+    .header {{
+      position:fixed; top:10mm; left:12mm; right:12mm;
+      display:flex; justify-content:space-between; align-items:center; gap:12px;
+      background:linear-gradient(90deg,var(--headGradA) 0%, var(--headGradB) 100%);
+      border:1px solid #d1fae5; border-radius:12px;
+      padding:10px 12px;
+    }}
+    .header-left {{ display:flex; align-items:center; gap:10px; }}
+    .logo {{ height:32px; width:auto; object-fit:contain; border-radius:6px; background:#fff; padding:3px; }}
+    .titles .brand {{ color:var(--brand); font-weight:800; font-size:12px; line-height:1.1; }}
+    .titles .title {{ color:#111827; font-weight:800; font-size:15px; line-height:1.1; }}
+    .header-info {{ text-align:right; font-size:9px; color:#374151; line-height:1.5; }}
+    .main {{ padding-top:92px; }} /* asegura que nada se solape con la cabecera */
+
+    /* PANEL contenedor para Datos de suministro */
+    .panel {{ border:1px solid var(--border); border-radius:10px; padding:10px; background:#fff; }}
+    .section-title {{ font-size:13px; font-weight:700; color:var(--brandDark); padding-bottom:6px; margin:14px 0 8px; }}
+
+    /* Datos + KPIs en un único panel */
+    .supply-grid {{ display:grid; grid-template-columns:1fr minmax(260px,340px); gap:12px; align-items:start; }}
+    .data-block {{ font-size:10px; line-height:1.7; }}
+    .data-block .label {{ font-weight:600; color:#374151; }}
+
+    .kpis {{ display:flex; gap:10px; align-items:stretch; justify-content:flex-end; }}
+    .kpi {{ border:1px solid var(--border); border-radius:10px; padding:8px 10px; background:#fff; min-width:110px;
+           display:flex; flex-direction:column; align-items:center; justify-content:center; }}
+    .kpi .value {{ font-size:17px; font-weight:800; line-height:1.1; }}
+    .kpi .label {{ font-size:8px; color:var(--muted); text-transform:uppercase; font-weight:600; margin-top:3px; }}
+    .value.ok {{ color:var(--ok); }} .value.bad {{ color:var(--bad); }}
+
+    /* Comparativa de precios (chips SIN bordes) */
+    .compare-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }}
+    .price-card {{ border:1px solid var(--border); border-radius:10px; padding:10px; background:#fff; }}
+    .price-card__title {{ font-weight:700; margin-bottom:8px; color:#374151; }}
+    .grid-block {{ margin-bottom:8px; }}
+    .grid-title {{ font-weight:600; font-size:9px; color:#374151; margin:0 0 4px 0; }}
+    .grid-row {{ display:grid; grid-template-columns:repeat(6, minmax(0,1fr)); gap:6px; }}
+    .cell {{ border:0; background:#f7fcf9; border-radius:6px; padding:6px 8px; text-align:center; font-size:9px; }}
+    .cell-k {{ color:#4b5563; font-weight:600; margin-right:4px; }}
+    .cell-v {{ color:#111827; font-weight:700; }}
+
+    /* Tabla desglose (verde suave) */
+    table {{ width:100%; border-collapse:collapse; font-size:10px; margin-top:10px; }}
+    th, td {{ padding:8px; text-align:left; }}
+    th {{ background:var(--bgHead); border-bottom:1px solid #c7eadc; color:#064e3b; font-weight:600; }}
+    td {{ border-bottom:1px solid var(--border); }}
+    tr:last-child td {{ border-bottom:0; }}
+    .right {{ text-align:right; }}
+    .currency {{ white-space:nowrap; }}
+
+    /* Gráfico: forzamos a misma página */
+    .chart-container {{ margin-top:12px; page-break-inside:avoid; }}
+    .chart-container img {{ width:100%; height:auto; max-height:250px; border:1px solid var(--border); border-radius:8px; }}
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="header-left">
+      <img class="logo" src="{logo_src}" alt="Logo Open Energies" />
+      <div class="titles">
+        <div class="brand">Open Energies</div>
+        <div class="title">Informe comparativa</div>
+      </div>
+    </div>
+    <div class="header-info">
+      <div><b>Fecha Estudio:</b> {fecha}</div>
+      <div><b>Realizado por:</b> Open Energies</div>
+      <div><b>CUPS:</b> {cups}</div>
+    </div>
+  </div>
+
+  <div class="page main">
+    <!-- Datos de Suministro + KPIs en un solo panel -->
+    <div class="panel">
+      <div class="section-title">Datos de Suministro</div>
+      <div class="supply-grid">
+        <div class="data-block">
+          <div><span class="label">Titular:</span> {cliente}</div>
+          <div><span class="label">CIF/DNI:</span> {cif}</div>
+          <div><span class="label">Dirección:</span> {direccion}</div>
+          <div><span class="label">Población:</span> {poblacion}</div>
+        </div>
+        <div class="kpis">
+          <div class="kpi"><div class="value {'ok' if ah_pct >= 0 else 'bad'}">{_fmt_number(ah_pct)}%</div><div class="label">% Ahorro</div></div>
+          <div class="kpi"><div class="value {'ok' if ah_mes >= 0 else 'bad'}">{_fmt_number(ah_mes)} €</div><div class="label">Ahorro Mes</div></div>
+          <div class="kpi"><div class="value {'ok' if ah_eur >= 0 else 'bad'}">{_fmt_number(ah_eur)} €</div><div class="label">Ahorro Año</div></div>
+        </div>
+      </div>
+    </div>
+
+    {precios_block}
+
+    <div class="section-title">Desglose por conceptos</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Concepto</th>
+          <th class="right">Tarifa Actual</th>
+          <th class="right">Tarifa Propuesta</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Importe Potencia</td><td class="right currency">{_fmt_number(res.actual.potencia_anual)} €</td><td class="right currency">{_fmt_number(res.propuesta.potencia_anual)} €</td></tr>
+        <tr><td>Importe Energía</td><td class="right currency">{_fmt_number(res.actual.energia_anual)} €</td><td class="right currency">{_fmt_number(res.propuesta.energia_anual)} €</td></tr>
+        <tr><td>Otros Cargos (Alquiler, etc.)</td><td class="right currency">{_fmt_number(res.actual.cargos_fijos_anual)} €</td><td class="right currency">{_fmt_number(res.propuesta.cargos_fijos_anual)} €</td></tr>
+        <tr><td>Impuesto Eléctrico</td><td class="right currency">{_fmt_number(res.actual.impuesto_electricidad)} €</td><td class="right currency">{_fmt_number(res.propuesta.impuesto_electricidad)} €</td></tr>
+        <tr><td>IVA ({int(iva_pct*100)}%)</td><td class="right currency">{_fmt_number(res.actual.iva)} €</td><td class="right currency">{_fmt_number(res.propuesta.iva)} €</td></tr>
+        <tr style="font-weight:700; background: var(--bgHead);">
+          <td>Facturación Anual Total</td>
+          <td class="right currency">{_fmt_number(res.actual.total_anual)} €</td>
+          <td class="right currency">{_fmt_number(res.propuesta.total_anual)} €</td>
+        </tr>
+      </tbody>
+    </table>
+
+    {f'<div class="chart-container"><div class="section-title">Evolución Mensual</div><img src="{chart_url}" alt="Evolución mensual" /></div>' if chart_url else ''}
+  </div>
+</body>
+</html>
+"""
+
+
+
+# ===================== CICLO DE VIDA DE LA APLICACIÓN (PLAYWRIGHT) =====================
+
+@app.on_event("startup")
+async def startup_playwright() -> None:
+    """Inicializa Playwright y lanza el navegador al arrancar el servicio."""
+    global _pw, _browser
+    _pw = await async_playwright().start()
+    _browser = await _pw.chromium.launch(args=["--no-sandbox"])
+    print("Playwright-Chromium (async) inicializado con éxito.")
+
+@app.on_event("shutdown")
+async def shutdown_playwright() -> None:
+    """Cierra el navegador y detiene Playwright al apagar el servicio."""
+    global _pw, _browser
+    if _browser:
+        await _browser.close()
+    if _pw:
+        await _pw.stop()
+    print("Playwright-Chromium (async) detenido.")
+
+async def render_html_to_pdf(html: str) -> bytes:
+    """Función refactorizada para generar el PDF usando la instancia global del navegador."""
+    if not _browser:
+        raise RuntimeError("Playwright browser no está inicializado.")
+    
+    page = await _browser.new_page()
+    try:
+        await page.set_content(html, wait_until="networkidle")
+        pdf_bytes = await page.pdf(
+            format="A4",
+            print_background=True,
+            margin={"top": "12mm", "bottom": "15mm", "left": "12mm", "right": "12mm"},
+        )
+        return pdf_bytes
+    finally:
+        await page.close()
+
+
+# server.py (versión mejorada)
+
+# ===================== ENDPOINTS DE LA API =====================
+
+@app.get("/health", summary="Comprobar estado del servicio")
+async def health_check():
+    """Endpoint de salud para verificar que el servicio está activo."""
+    return {"status": "ok"}
+
+@app.post(
+    "/generate-report",
+    summary="Generar informe de comparativa en PDF",
+    dependencies=[Depends(get_api_key)], # <-- ¡Aquí se aplica la seguridad!
+)
+async def generate_report_endpoint(payload: MonthlyInput) -> Response:
     """
-    Calcula la comparativa y devuelve un PDF con cabecera + tablas + gráficos.
+    Endpoint principal y seguro.
+    Recibe los datos, genera el gráfico y el HTML, lo renderiza a PDF y lo devuelve.
     """
-    # 1) Reutiliza el cálculo existente
-    res = await compare(payload)  # -> CompareResult
+    try:
+        # 1. Realiza los cálculos de la comparativa
+        comparison_result = compute_monthly_from_sips(payload)
 
-    # 2) Construye el HTML del informe
-    html = _build_report_html(payload.suministro, res)
+        # 2. Genera la URL del gráfico en base64
+        chart_url = make_monthly_bar_chart_dual(
+            meses=comparison_result.meses,
+            ener_actual=comparison_result.energia_actual, pot_actual=comparison_result.potencia_actual, imp_actual=comparison_result.impuestos_actual,
+            ener_prop=comparison_result.energia_propuesta, pot_prop=comparison_result.potencia_propuesta, imp_prop=comparison_result.impuestos_propuesta
+        )
 
-    # 3) Renderiza a PDF
-    pdf_bytes = await _render_html_to_pdf(html)
-    return Response(
-        content=pdf_bytes,
-        media_type="application/pdf",
-        headers={"Content-Disposition": 'inline; filename="informe.pdf"'}
+        # 3. Construye el HTML del informe
+        suministro_info = payload.suministro or SuministroInfo(direccion="-", cif="-", fecha_estudio="-", poblacion="-", cups="-")
+        html_content = _build_report_html(
+        suministro_info,
+        comparison_result.resumen,
+        payload.iva_pct,
+        chart_url=chart_url,
+        actual_plan=payload.actual,
+        propuesta_plan=payload.propuesta,
     )
+
+        # 4. Renderiza el HTML a PDF (usando la nueva función)
+        pdf_bytes = await render_html_to_pdf(html_content)
+
+        # 5. Devuelve el PDF
+        return Response(content=pdf_bytes, media_type="application/pdf")
+
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        print(f"Error inesperado al generar el informe: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error generating PDF")
